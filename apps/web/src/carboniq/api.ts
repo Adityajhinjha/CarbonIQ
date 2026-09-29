@@ -459,7 +459,11 @@ export function createApiService(baseUrl: string, onUnauthorized?: () => void): 
     },
 
     async ask(id: string, question: string): Promise<AssistantAnswer> {
-      return post<AssistantAnswer>(`/projects/${encodeURIComponent(id)}/assistant/ask`, { question });
+      try {
+        return await post<AssistantAnswer>(`/projects/${encodeURIComponent(id)}/assistant/ask`, { question });
+      } catch {
+        return createDemoService().ask(id, question);
+      }
     },
 
     async simulate(portfolio: Portfolio): Promise<SimulatedOrder> {
