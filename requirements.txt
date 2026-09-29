@@ -1,0 +1,14 @@
+# CarbonIQ - HF Spaces root requirements
+# Installs the FastAPI backend dependencies
+
+alembic==1.19.1
+fastapi==0.141.1
+email-validator==2.3.0
+psycopg[binary]==3.3.4
+pgvector==0.5.0
+pydantic-settings==2.15.0
+pwdlib[argon2]==0.3.1
+PyJWT==2.13.0
+reportlab==4.4.9
+SQLAlchemy==2.0.52
+uvicorn[standard]==0.52.4
