@@ -394,17 +394,6 @@ export function createApiService(baseUrl: string, onUnauthorized?: () => void): 
       return items.map(normalizeProject);
     },
 
-    login: signIn,
-
-    async register(name: string, email: string, password: string): Promise<User> {
-      await post("/auth/register", { name, organization_name: name, email, password });
-      return signIn(email, password);
-    },
-
-    logout() {
-      token = null;
-    },
-
     async preferences(): Promise<BuyerPreference[]> {
       const list = await request<any[]>("/preferences");
       return list.map(normalizePreference);
