@@ -5,6 +5,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -173,7 +174,8 @@ def commit_project(db: Session, project: Project) -> Project:
 @router.get("", response_model=ProjectPage)
 def list_projects(
     db: Annotated[Session, Depends(get_db)],
-    q: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+    q: Annotated[str | None, Query(max_length=200)] = None,
+    query: Annotated[str | None, Query(max_length=200)] = None,
     project_type: Annotated[list[str] | None, Query()] = None,
     category: ProjectCategory | None = None,
     country: Annotated[list[str] | None, Query()] = None,
@@ -183,22 +185,39 @@ def list_projects(
     vintage_from: Annotated[int | None, Query(ge=1900, le=2200)] = None,
     vintage_to: Annotated[int | None, Query(ge=1900, le=2200)] = None,
     vintage_year: Annotated[int | None, Query(ge=1900, le=2200)] = None,
+    vintage: Annotated[int | None, Query(ge=1900, le=2200)] = None,
     price_min: Annotated[float | None, Query(ge=0)] = None,
     price_max: Annotated[float | None, Query(ge=0)] = None,
+    max_price: Annotated[float | None, Query(ge=0)] = None,
     risk_max: Annotated[float | None, Query(ge=0, le=100)] = None,
+    max_risk: Annotated[float | None, Query(ge=0, le=100)] = None,
     impact_min: Annotated[float | None, Query(ge=0, le=100)] = None,
     available_only: bool = False,
     sdg: Annotated[list[int] | None, Query()] = None,
-    sort: Annotated[
-        str, Query(pattern="^(name|price|carboniq_score|risk_score|updated_at)$")
-    ] = "name",
-    order: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    sort: Annotated[str, Query()] = "name",
+    order: Annotated[str, Query()] = "asc",
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> ProjectPage:
+    search_query = q or query
+    vintage_val = vintage_year if vintage_year is not None else vintage
+    effective_price_max = price_max if price_max is not None else max_price
+    effective_risk_max = risk_max if risk_max is not None else max_risk
+
+    # Handle frontend compound sort strings like "score_desc", "price_asc"
+    if "_" in sort and sort not in ("carboniq_score", "risk_score", "updated_at"):
+        parts = sort.rsplit("_", 1)
+        if parts[1] in ("asc", "desc"):
+            field_name = parts[0]
+            order = parts[1]
+            if field_name == "score":
+                sort = "carboniq_score"
+            else:
+                sort = field_name
+
     if vintage_from is not None and vintage_to is not None and vintage_to < vintage_from:
         raise HTTPException(status_code=422, detail="vintage_to must not precede vintage_from.")
-    if price_min is not None and price_max is not None and price_max < price_min:
+    if price_min is not None and effective_price_max is not None and effective_price_max < price_min:
         raise HTTPException(status_code=422, detail="price_max must not be less than price_min.")
     if country and any(len(value.strip()) != 2 for value in country):
         raise HTTPException(status_code=422, detail="Countries must use two-letter codes.")
@@ -207,8 +226,8 @@ def list_projects(
 
     latest = latest_scores_subquery()
     conditions = [Project.status == ProjectStatus.ACTIVE]
-    if q:
-        escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    if search_query:
+        escaped = search_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         pattern = f"%{escaped}%"
         conditions.append(
             or_(
@@ -233,16 +252,16 @@ def list_projects(
         conditions.append(Project.vintage_end >= vintage_from)
     if vintage_to is not None:
         conditions.append(Project.vintage_start <= vintage_to)
-    if vintage_year is not None:
+    if vintage_val is not None:
         conditions.extend(
-            [Project.vintage_start <= vintage_year, Project.vintage_end >= vintage_year]
+            [Project.vintage_start <= vintage_val, Project.vintage_end >= vintage_val]
         )
     if price_min is not None:
         conditions.append(Project.price_per_credit >= price_min)
-    if price_max is not None:
-        conditions.append(Project.price_per_credit <= price_max)
-    if risk_max is not None:
-        conditions.append(latest.c.risk_score <= risk_max)
+    if effective_price_max is not None:
+        conditions.append(Project.price_per_credit <= effective_price_max)
+    if effective_risk_max is not None:
+        conditions.append(latest.c.risk_score <= effective_risk_max)
     if impact_min is not None:
         conditions.append(latest.c.impact_score >= impact_min)
     if available_only:
@@ -319,3 +338,101 @@ def list_project_documents(
         DocumentResponse.model_validate(document)
         for document in sorted(project.documents, key=lambda item: (item.title, str(item.id)))
     ]
+
+
+@router.get("/{project_id}/score")
+def get_project_score(
+    project_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> dict | None:
+    project = load_public_project(db, project_id)
+    score = max(
+        project.scores,
+        key=lambda item: (item.calculated_at, str(item.id)),
+        default=None,
+    )
+    if score is None:
+        return None
+    return {
+        "id": str(score.id),
+        "project_id": str(score.project_id),
+        "methodology_version": score.methodology_version,
+        "status": "scored" if score.carboniq_score is not None else "insufficient_evidence",
+        "overall_score": float(score.carboniq_score) if score.carboniq_score is not None else None,
+        "quality_score": float(score.quality_score) if score.quality_score is not None else None,
+        "impact_score": float(score.impact_score) if score.impact_score is not None else None,
+        "risk_score": float(score.risk_score) if score.risk_score is not None else None,
+        "confidence": float(score.confidence) if score.confidence is not None else 1.0,
+        "calculated_at": score.calculated_at.isoformat() if score.calculated_at else "",
+        "missing_evidence": score.explanation.get("missing_evidence", []) if isinstance(score.explanation, dict) else [],
+        "components": {
+            "integrity": float(score.integrity_score) if score.integrity_score is not None else None,
+            "permanence": float(score.permanence_score) if score.permanence_score is not None else None,
+            "verification": float(score.verification_score) if score.verification_score is not None else None,
+            "co_benefits": float(score.co_benefits_score) if score.co_benefits_score is not None else None,
+            "value": float(score.value_score) if score.value_score is not None else None,
+            "delivery": float(score.delivery_score) if score.delivery_score is not None else None,
+            "compatibility": float(score.compatibility_score) if score.compatibility_score is not None else None,
+        },
+    }
+
+
+@router.get("/{project_id}/risk-signals")
+def get_project_risk_signals(
+    project_id: UUID,
+    db: Annotated[Session, Depends(get_db)],
+) -> list[dict]:
+    project = load_public_project(db, project_id)
+    return [
+        {
+            "id": str(signal.id),
+            "code": signal.code,
+            "severity": signal.severity.value if hasattr(signal.severity, "value") else str(signal.severity),
+            "explanation": signal.title,
+            "evidence": signal.message,
+            "rule_version": signal.rule_version,
+            "detected_at": signal.detected_at.isoformat() if signal.detected_at else "",
+            "human_review": signal.requires_review,
+        }
+        for signal in project.risk_signals
+        if signal.resolved_at is None
+    ]
+
+
+class RiskReviewRequest(BaseModel):
+    action: str = "resolve"  # "resolve", "acknowledge", "dismiss"
+    notes: str = ""
+
+
+@router.post("/{project_id}/risk-signals/{signal_id}/review")
+def review_risk_signal(
+    project_id: UUID,
+    signal_id: UUID,
+    payload: RiskReviewRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """Human-in-the-loop curator review to acknowledge or resolve flagged project risk signals."""
+    from datetime import datetime, timezone
+    from app.models.score import RiskSignal
+
+    signal = db.scalar(
+        select(RiskSignal).where(
+            RiskSignal.id == signal_id,
+            RiskSignal.project_id == project_id,
+        )
+    )
+    if signal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Risk signal not found.")
+
+    signal.requires_review = False
+    signal.resolved_at = datetime.now(timezone.utc)
+    db.commit()
+
+    return {
+        "status": "success",
+        "signal_id": str(signal.id),
+        "action": payload.action,
+        "resolved_at": signal.resolved_at.isoformat(),
+        "notes": payload.notes,
+    }
+

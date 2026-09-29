@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -281,6 +282,48 @@ def create_quote(
     if portfolio.status == PortfolioStatus.ORDERED:
         raise HTTPException(status_code=409, detail="Portfolio has already been ordered.")
     return build_quote(portfolio)
+
+
+class SimulateOrderRequest(BaseModel):
+    portfolio_id: UUID
+
+
+@router.post("/simulate")
+def simulate_order(
+    payload: SimulateOrderRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    from app.api.routes.portfolios import get_owned_portfolio, portfolio_response
+
+    portfolio = db.scalar(
+        select(Portfolio)
+        .where(Portfolio.id == payload.portfolio_id, Portfolio.user_id == current_user.id)
+    )
+    if portfolio is None:
+        raise HTTPException(status_code=404, detail="Portfolio not found.")
+
+    existing_order = db.scalar(
+        select(SimulatedOrder).where(SimulatedOrder.portfolio_id == portfolio.id)
+    )
+    if existing_order:
+        order = existing_order
+    else:
+        order_payload = OrderCreate(
+            portfolio_id=portfolio.id,
+            acknowledge_simulation=True,
+            simulate_retirement=False,
+        )
+        order = create_order(order_payload, current_user, db)
+
+    port_resp = portfolio_response(get_owned_portfolio(db, current_user.id, portfolio.id))
+    return {
+        "id": str(order.id),
+        "portfolio": port_resp.model_dump(mode="json"),
+        "created_at": order.created_at.isoformat() if hasattr(order, "created_at") else datetime.now(timezone.utc).isoformat(),
+        "disclaimer": "Demonstration only. No credits were purchased, transferred or retired.",
+        "disclaimer_version": "1.0.0",
+    }
 
 
 @router.post("", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)

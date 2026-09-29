@@ -1,0 +1,26 @@
+{
+  "name": "carboniq-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev apps/web --hostname 127.0.0.1 --port 3000",
+    "build": "next build apps/web",
+    "start": "next start apps/web --hostname 127.0.0.1 --port 3000",
+    "typecheck": "tsc --noEmit -p apps/web/tsconfig.json",
+    "test": "tsx --test tests/*.test.ts",
+    "framer:bundle": "node scripts/bundle-framer.mjs"
+  },
+  "dependencies": {
+    "next": "^16.3.5",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.5.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}

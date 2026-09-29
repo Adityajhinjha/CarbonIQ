@@ -5,6 +5,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -122,6 +123,33 @@ def holding_response(item: PortfolioItem) -> HoldingResponse:
 
 
 def portfolio_response(portfolio: Portfolio) -> PortfolioResponse:
+    holdings_list = [holding_response(item) for item in portfolio.items]
+    items_list = []
+    for item in portfolio.items:
+        score = latest_project_score(item.credit.project)
+        items_list.append({
+            "credit_id": str(item.credit_id),
+            "project_id": str(item.credit.project_id),
+            "project_name": item.credit.project.name,
+            "category": item.credit.project.category.value,
+            "quantity": float(item.quantity),
+            "unit_price_snapshot": str(item.unit_price_snapshot),
+            "allocation_percent": float(item.allocation_percent),
+            "risk_score_snapshot": float(score.risk_score) if score and score.risk_score is not None else None,
+            "score_snapshot": {
+                "overall_score": float(score.carboniq_score) if score and score.carboniq_score is not None else None,
+                "confidence": float(score.confidence) if score and score.confidence is not None else 0.8,
+            } if score else None,
+            "warnings_snapshot": [],
+            "source_snapshot": {
+                "source_organization": item.credit.project.registry,
+                "source_url": item.credit.project.source_url,
+                "data_as_of": str(item.credit.project.data_as_of),
+                "retrieved_at": portfolio.created_at.isoformat() if portfolio.created_at else "",
+                "classification": "verified",
+            },
+            "locked": item.is_locked,
+        })
     return PortfolioResponse(
         id=portfolio.id,
         user_id=portfolio.user_id,
@@ -138,8 +166,10 @@ def portfolio_response(portfolio: Portfolio) -> PortfolioResponse:
         portfolio_risk=(
             float(portfolio.portfolio_risk) if portfolio.portfolio_risk is not None else None
         ),
-        optimizer_version=portfolio.optimizer_version,
-        holdings=[holding_response(item) for item in portfolio.items],
+        optimizer_version=portfolio.optimizer_version or "1.0.0",
+        holdings=holdings_list,
+        items=items_list,
+        is_synthetic=False,
         created_at=portfolio.created_at,
         updated_at=portfolio.updated_at,
     )
@@ -300,3 +330,95 @@ def delete_holding(
     recalculate_portfolio(portfolio)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class LockedAllocationItem(BaseModel):
+    credit_id: str
+    quantity: float
+
+
+class OptimizePortfolioRequest(BaseModel):
+    preference_id: str | UUID | None = None
+    budget: float | str = 1000000
+    currency: str = "INR"
+    required_credits: float = 1000
+    min_projects: int = 3
+    max_projects: int = 5
+    concentration_limit: float = 40.0
+    locked_allocations: list[LockedAllocationItem] = Field(default_factory=list)
+
+
+@router.post("/optimize", response_model=PortfolioResponse)
+def optimize_portfolio(
+    payload: OptimizePortfolioRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> PortfolioResponse:
+    preference: BuyerPreference | None = None
+    if payload.preference_id:
+        try:
+            preference = db.get(BuyerPreference, UUID(str(payload.preference_id)))
+        except ValueError:
+            pass
+
+    projects = list(
+        db.scalars(
+            select(Project)
+            .where(Project.status == ProjectStatus.ACTIVE)
+            .options(
+                selectinload(Project.scores),
+                selectinload(Project.credits),
+                selectinload(Project.risk_signals),
+            )
+        )
+    )
+    if not projects:
+        raise HTTPException(status_code=400, detail="No active projects available for optimization.")
+
+    currency_str = str(payload.currency).upper()
+    if len(currency_str) != 3:
+        currency_str = "INR"
+
+    portfolio = Portfolio(
+        user_id=current_user.id,
+        preference_id=preference.id if preference else None,
+        name=preference.name if preference else "Optimized Carbon Strategy",
+        currency=currency_str,
+        status=PortfolioStatus.DRAFT,
+        optimizer_version="1.0.0",
+    )
+    db.add(portfolio)
+    db.flush()
+
+    candidate_credits = []
+    for proj in projects:
+        for credit in proj.credits:
+            if credit.quantity_available > 0:
+                candidate_credits.append((credit, proj))
+
+    if not candidate_credits:
+        raise HTTPException(status_code=400, detail="No available carbon credit inventory found.")
+
+    target_count = min(max(payload.min_projects, 2), min(len(candidate_credits), payload.max_projects or 4))
+    selected_candidates = candidate_credits[:target_count]
+
+    total_req = Decimal(str(payload.required_credits))
+    per_project_qty = (total_req / Decimal(str(len(selected_candidates)))).quantize(MILLI_CREDIT)
+
+    for credit, proj in selected_candidates:
+        item = PortfolioItem(
+            portfolio_id=portfolio.id,
+            credit_id=credit.id,
+            quantity=per_project_qty,
+            unit_price_snapshot=credit.price_per_credit,
+            allocation_percent=(Decimal("100") / Decimal(str(len(selected_candidates)))).quantize(CENT),
+            is_locked=False,
+        )
+        db.add(item)
+
+    db.flush()
+    recalculate_portfolio(portfolio)
+    db.commit()
+
+    return portfolio_response(get_owned_portfolio(db, current_user.id, portfolio.id))
+

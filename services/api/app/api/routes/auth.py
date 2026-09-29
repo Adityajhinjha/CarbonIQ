@@ -68,7 +68,7 @@ def register(payload: RegisterRequest, db: Annotated[Session, Depends(get_db)]) 
     user = User(
         email=str(payload.email),
         password_hash=hash_password(payload.password.get_secret_value()),
-        organization_name=payload.organization_name.strip(),
+        organization_name=payload.get_organization_name(),
         role=UserRole.BUYER,
     )
     db.add(user)

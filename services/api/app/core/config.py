@@ -19,7 +19,8 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(default=15, ge=1, le=1440)
     refresh_token_expire_days: int = Field(default=30, ge=1, le=365)
     cors_allowed_origins: Annotated[list[AnyHttpUrl], NoDecode] = [
-        AnyHttpUrl("http://localhost:3000")
+        AnyHttpUrl("http://localhost:3000"),
+        AnyHttpUrl("http://127.0.0.1:3000"),
     ]
     trusted_hosts: Annotated[list[str], NoDecode] = [
         "localhost",

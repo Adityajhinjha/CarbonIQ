@@ -46,6 +46,22 @@ def get_current_user(
     return user
 
 
+def get_current_user_optional(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    db: Annotated[Session, Depends(get_db)],
+) -> User | None:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        return None
+    try:
+        claims = decode_access_token(credentials.credentials)
+    except InvalidAccessTokenError:
+        return None
+    user = db.get(User, claims.subject)
+    if user is None or not user.is_active:
+        return None
+    return user
+
+
 class RoleChecker:
     def __init__(self, *allowed_roles: UserRole) -> None:
         self.allowed_roles = frozenset(allowed_roles)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -66,5 +67,8 @@ class PortfolioResponse(BaseModel):
     portfolio_risk: float | None
     optimizer_version: str | None
     holdings: list[HoldingResponse]
+    items: list[Any] = Field(default_factory=list)
+    is_synthetic: bool = False
     created_at: datetime
     updated_at: datetime
+
