@@ -228,7 +228,7 @@ export function normalizePreference(p: any): BuyerPreference {
 
 /** Live FastAPI backend adapter with request normalization and error envelopes. */
 export function createApiService(baseUrl: string, onUnauthorized?: () => void): CarbonIQService {
-  let token: string | null = null;
+  let token: string | null = typeof window !== "undefined" ? localStorage.getItem("carboniq_token") : null;
   const base = baseUrl.replace(/\/+$/, "");
 
   async function request<T>(path: string, options: RequestInit = {}, blob = false): Promise<T> {
@@ -294,19 +294,44 @@ export function createApiService(baseUrl: string, onUnauthorized?: () => void): 
 
   const post = <T>(path: string, body: unknown) => request<T>(path, { method: "POST", body: JSON.stringify(body) });
 
-  async function signIn(email: string, password: string): Promise<User> {
-    const auth = await post<{ access_token: string }>("/auth/login", { email, password });
-    token = auth.access_token;
-    const rawUser = await request<any>("/auth/me");
-    return {
-      id: String(rawUser.id),
-      name: rawUser.name || rawUser.organization_name || "Buyer",
-      email: rawUser.email,
-      role: rawUser.role,
-    };
-  }
-
   return {
+    async login(email: string, password: string): Promise<User> {
+      const auth = await post<{ access_token: string }>("/auth/login", { email, password });
+      token = auth.access_token;
+      if (typeof window !== "undefined") {
+        localStorage.setItem("carboniq_token", token);
+      }
+      const rawUser = await request<any>("/auth/me");
+      const user: User = {
+        id: String(rawUser.id),
+        name: rawUser.name || rawUser.organization_name || "Buyer",
+        email: rawUser.email,
+        role: rawUser.role,
+      };
+      if (typeof window !== "undefined") {
+        localStorage.setItem("carboniq_user", JSON.stringify(user));
+      }
+      return user;
+    },
+
+    async register(name: string, email: string, password: string): Promise<User> {
+      await post<any>("/auth/register", {
+        name,
+        email,
+        password,
+        organization_name: name || "Individual Buyer",
+      });
+      return this.login(email, password);
+    },
+
+    logout(): void {
+      token = null;
+      if (typeof window !== "undefined") {
+        localStorage.removeItem("carboniq_token");
+        localStorage.removeItem("carboniq_user");
+      }
+    },
+
     async projects(filters: ProjectFilters, signal?: AbortSignal): Promise<PageResult<Project>> {
       const query = new URLSearchParams();
       if (filters.query) query.set("q", filters.query);
